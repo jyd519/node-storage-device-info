@@ -10,6 +10,7 @@
       ],
       'conditions' : [
         ['OS=="win"', {
+          "defines": ["UNICODE", "_UNICODE"],
           'libraries' : ['kernel32.lib']
         }]
       ]

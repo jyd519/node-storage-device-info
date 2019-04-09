@@ -7,6 +7,9 @@
 
 #include <string>
 
+#include <locale>
+#include <codecvt>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,18 +32,21 @@
 #include "storage.h"
 
 #ifdef _WIN32
-static char errbuf[1024];
+static wchar_t errbuf[1024] = {0};
 #endif
-const char* drive_strerror(int code) {
+
 #ifdef _WIN32
+const wchar_t* drive_strerror(int code) {
 	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, code, 0, errbuf,
 			1024, NULL)) {
 		return errbuf;
 	} else {
-		strcpy(errbuf, "Unknown error");
+		wcscpy(errbuf, L"Unknown error");
 		return errbuf;
 	}
 #else
+
+const char* drive_strerror(int code) {
 	return strerror(code);
 #endif
 }
@@ -89,7 +95,9 @@ void DeviceInfoWrap::GetPartitionSpaceRequestBegin (uv_work_t* request) {
 	ULARGE_INTEGER total;
 	ULARGE_INTEGER free;
 
-	if (GetDiskFreeSpaceEx(info_request->path.c_str(), NULL, &total, &free)) {
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+    auto wpath = convert.from_bytes(info_request->path);
+	if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
 		info_request->rcode = 0;
 		info_request->total = (int) (total.QuadPart / 1024 / 1024);
 		info_request->free  = (int) (free.QuadPart / 1024 / 1024);
@@ -129,7 +137,13 @@ void DeviceInfoWrap::GetPartitionSpaceRequestEnd(uv_work_t* request, int status)
 	} else {
 		if (info_request->rcode > 0) {
 			Local<Value> argv[1];
+#ifdef _WIN32
+            const wchar_t* perr = drive_strerror(info_request->rcode);
+            std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+            argv[0] = Nan::Error(Nan::New(convert.to_bytes(perr)).ToLocalChecked());
+#else
 			argv[0] = Nan::Error(drive_strerror(info_request->rcode));
+#endif  
 			info_request->cb->Call(1, argv);
 		} else {
 
