@@ -4,7 +4,6 @@
 #include <node.h>
 #include <node_buffer.h>
 #include <nan.h>
-
 #include <string>
 
 #include <locale>
@@ -31,6 +30,9 @@
 
 #include "storage.h"
 
+using Nan::AsyncWorker;
+using namespace v8;
+
 #ifdef _WIN32
 static wchar_t errbuf[1024] = {0};
 #endif
@@ -51,125 +53,77 @@ const char* drive_strerror(int code) {
 #endif
 }
 
-namespace storage {
+class GetFreeSpaceWorker: public AsyncWorker {
+ public:
+  GetFreeSpaceWorker(Nan::Callback *callback, std::string path)
+    : AsyncWorker(callback), path(path) {}
+  ~GetFreeSpaceWorker() {}
 
-static Nan::Persistent<FunctionTemplate> DeviceInfoWrap_constructor;
+  void Execute () {
+#ifdef _WIN32
+      ULARGE_INTEGER total;
+      ULARGE_INTEGER free;
+      std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+      auto wpath = convert.from_bytes(path);
+      if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
+        this->rcode = 0;
+        this->total = (unsigned int) (total.QuadPart / 1024 / 1024);
+        this->free  = (unsigned int) (free.QuadPart / 1024 / 1024);
+      } else {
+        this->rcode = GetLastError();
+        std::wstring err = drive_strerror(this->rcode);
+        this->SetErrorMessage(convert.to_bytes(err).c_str());
+      }
+#else
+      struct statfs buf;
+      if (statfs(path.c_str(), &buf) == 0) {
+        this->rcode = 0;
+        this->total = (buf.f_bsize * buf.f_blocks) / 1024 / 1024;
+        this->free  = (buf.f_bsize * buf.f_bfree) / 1024 / 1024;
+      } else {
+        this->rcode = errno;
+        this->SetErrorMessage(drive_strerror(rcode));
+      }
+#endif /* _WIN32 */
+  }
 
-void InitAll(Handle<Object> exports) {
-	DeviceInfoWrap::Init(exports);
+  // Executed when the async work is complete
+  // this function will be run inside the main event loop
+  // so it is safe to use V8 again
+  void HandleOKCallback () {
+    Nan::HandleScope scope;
+
+    Local<Value> argv[2];
+    argv[0] = Nan::Null();
+
+    Local<Object> return_info = Nan::New<Object>();
+
+    return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<Uint32>(total));
+    return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<Uint32>(free));
+    argv[1] = return_info;
+
+    callback->Call(2, argv, async_resource);
+  }
+
+ private:
+#ifdef _WIN32
+	DWORD rcode;
+#else /* _WIN32 */
+	int rcode;
+#endif /* _WIN32 */
+	unsigned int total;
+	unsigned int free;
+	std::string path;
+};
+
+NAN_MODULE_INIT(InitAll) {
+  Nan::Set(target, Nan::New<String>("getPartitionSpace").ToLocalChecked(),
+    Nan::GetFunction(Nan::New<FunctionTemplate>(getPartitionSpace)).ToLocalChecked());
 }
 
 NODE_MODULE(storage, InitAll)
 
-void DeviceInfoWrap::Init(Handle<Object> exports) {
-	Nan::HandleScope scope;
-
-	Local<FunctionTemplate> tpl = Nan::New<FunctionTemplate>(DeviceInfoWrap::New);
-	tpl->SetClassName(Nan::New("DeviceInfoWrap").ToLocalChecked());
-	tpl->InstanceTemplate()->SetInternalFieldCount(1);
-
-	Nan::SetPrototypeMethod(tpl, "getPartitionSpace", DeviceInfoWrap::GetPartitionSpace);
-
-	DeviceInfoWrap_constructor.Reset(tpl);
-	exports->Set(Nan::New("DeviceInfoWrap").ToLocalChecked(),
-			Nan::GetFunction(tpl).ToLocalChecked());
-}
-
-NAN_METHOD(DeviceInfoWrap::New) {
-	Nan::HandleScope scope;
-
-	DeviceInfoWrap* device_info = new DeviceInfoWrap();
-
-	device_info->Wrap(info.This());
-
-	info.GetReturnValue().Set(info.This());
-}
-
-void DeviceInfoWrap::GetPartitionSpaceRequestBegin (uv_work_t* request) {
-	GetPartitionSpaceRequest *info_request
-			= (GetPartitionSpaceRequest*) request->data;
-
-	info_request->rcode = 0;
-
-#ifdef _WIN32
-	ULARGE_INTEGER total;
-	ULARGE_INTEGER free;
-
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
-    auto wpath = convert.from_bytes(info_request->path);
-	if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
-		info_request->rcode = 0;
-		info_request->total = (int) (total.QuadPart / 1024 / 1024);
-		info_request->free  = (int) (free.QuadPart / 1024 / 1024);
-	} else {
-		info_request->rcode = GetLastError();
-	}
-#else
-	struct statfs buf;
-	if (statfs(info_request->path.c_str(), &buf) == 0) {
-		info_request->rcode = 0;
-		info_request->total = (buf.f_bsize * buf.f_blocks) / 1024 / 1024;
-		info_request->free  = (buf.f_bsize * buf.f_bfree) / 1024 / 1024;
-	} else {
-		info_request->rcode = errno;
-	}
-#endif /* _WIN32 */
-}
-
-void DeviceInfoWrap::GetPartitionSpaceRequestEnd(uv_work_t* request, int status) {
-	Nan::HandleScope scope;
-
-	GetPartitionSpaceRequest *info_request
-			= (GetPartitionSpaceRequest*) request->data;
-
-	if (status) {
-		Local<Value> argv[1];
-		/**
-		 ** The uv_last_error() function doesn't seem to be available in recent
-		 ** libuv versions, and the uv_err_t variable also no longer appears to
-		 ** be a structure.  This causes issues when working with both Node.js
-		 ** 0.10 and 0.12.  So, for now, we will just give you the number.
-		 **/
-		char status_str[32];
-		sprintf(status_str, "%d", status);
-		argv[0] = Nan::Error(status_str);
-		info_request->cb->Call(1, argv);
-	} else {
-		if (info_request->rcode > 0) {
-			Local<Value> argv[1];
-#ifdef _WIN32
-            const wchar_t* perr = drive_strerror(info_request->rcode);
-            std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
-            argv[0] = Nan::Error(Nan::New(convert.to_bytes(perr)).ToLocalChecked());
-#else
-			argv[0] = Nan::Error(drive_strerror(info_request->rcode));
-#endif  
-			info_request->cb->Call(1, argv);
-		} else {
-
-			Local<Value> argv[2];
-			argv[0] = Nan::Null();
-
-			Local<Object> return_info = Nan::New<Object>();
-
-			return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<Uint32>(info_request->total));
-			return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<Uint32>(info_request->free));
-
-			argv[1] = return_info;
-
-			info_request->cb->Call(2, argv);
-		}
-	}
-
-	delete info_request;
-}
-
-NAN_METHOD(DeviceInfoWrap::GetPartitionSpace) {
-	Nan::HandleScope scope;
-
-	DeviceInfoWrap* device_info = DeviceInfoWrap::Unwrap<DeviceInfoWrap>(
-			info.This());
-
+NAN_METHOD(getPartitionSpace) {
 	if (info.Length() < 2) {
 		Nan::ThrowError("Two arguments are required");
 		return;
@@ -185,21 +139,9 @@ NAN_METHOD(DeviceInfoWrap::GetPartitionSpace) {
 		return;
 	}
 
-	GetPartitionSpaceRequest* request
-			= new GetPartitionSpaceRequest(*Nan::Utf8String(info[0]));
-
-	request->uv_request.data = (void*)request;
-
-	request->cb = new Nan::Callback(Local<Function>::Cast(info[1]));
-
-	request->device_info = device_info;
-
-	uv_queue_work(uv_default_loop(), &request->uv_request,
-			GetPartitionSpaceRequestBegin, GetPartitionSpaceRequestEnd);
-
-	info.GetReturnValue().Set(info.This());
+  std::string path = *Nan::Utf8String(info[0]);
+  Nan::Callback *callback = new Nan::Callback(Nan::To<Function>(info[1]).ToLocalChecked());
+  AsyncQueueWorker(new GetFreeSpaceWorker(callback, path));
 }
-
-}; /* namespace storage */
 
 #endif /* STORAGE_CC */
