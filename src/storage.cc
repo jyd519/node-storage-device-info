@@ -33,26 +33,27 @@
 using Nan::AsyncWorker;
 using namespace v8;
 
-std::string os_strerror(int code) {
 #ifdef _WIN32
-    LPVOID lpMsgBuf;
+std::string os_strerror(DWORD code) {
+    LPWSTR lpMsgBuf;
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
-    auto wpath = convert.from_bytes(path);
-    DWORD lastError = GetLastError();
-    if (FormatMessage(
+    if (FormatMessageW(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
         FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL,
-        lastError,
+        code,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR) &lpMsgBuf,
+        (LPWSTR)&lpMsgBuf,
         0, NULL)) {
-        return convert.to_bytes((const wchar_t*)lpMsgBuf);
+          std::string msg = convert.to_bytes(lpMsgBuf);
+          LocalFree(lpMsgBuf);
+          return msg;
     } else {
 		  return "Unknown error";
     }
 #else
+std::string os_strerror(int code) {
 	return strerror(code);
 #endif
 }
@@ -94,9 +95,15 @@ class GetFreeSpaceWorker: public AsyncWorker {
       HandleOKCallback();
     } else {
       std::string errmsg = os_strerror(rcode);
+#ifdef _WIN32
+      v8::Local<Object> errObj = Nan::To<Object>(Nan::Error(errmsg.c_str())).ToLocalChecked();
+      Nan::Set(errObj, Nan::New("code").ToLocalChecked(), Nan::New((uint32_t)rcode));
+      Nan::Set(errObj, Nan::New("syscall").ToLocalChecked(), Nan::New("GetDiskFreeSpaceEx").ToLocalChecked());
+      Nan::Set(errObj, Nan::New("path").ToLocalChecked(), Nan::New(path.c_str()).ToLocalChecked());
+#endif        
       v8::Local<v8::Value> argv[] = {
 #ifdef _WIN32
-        Nan::ErrnoException(rcode, "GetDiskFreeSpaceEx", errmsg.c_str(), this->path.c_str())
+        errObj
 #else
         Nan::ErrnoException(rcode, "statfs", errmsg.c_str(), this->path.c_str())
 #endif
@@ -117,9 +124,8 @@ class GetFreeSpaceWorker: public AsyncWorker {
     argv[0] = Nan::Null();
 
     Local<Object> return_info = Nan::New<Object>();
-
-    return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<v8::Number>(total));
-    return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<v8::Number>(free));
+    return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<v8::Number>((double)total));
+    return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<v8::Number>((double)free));
     argv[1] = return_info;
 
     callback->Call(2, argv, async_resource);
@@ -162,6 +168,7 @@ NAN_METHOD(getPartitionSpace) {
   std::string path = *Nan::Utf8String(info[0]);
   Nan::Callback *callback = new Nan::Callback(Nan::To<Function>(info[1]).ToLocalChecked());
   AsyncQueueWorker(new GetFreeSpaceWorker(callback, path));
+  info.GetReturnValue().SetUndefined();
 }
 
 #endif /* STORAGE_CC */
