@@ -33,22 +33,26 @@
 using Nan::AsyncWorker;
 using namespace v8;
 
+std::string os_strerror(int code) {
 #ifdef _WIN32
-static wchar_t errbuf[1024] = {0};
-#endif
-
-#ifdef _WIN32
-const wchar_t* drive_strerror(int code) {
-	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, code, 0, errbuf,
-			1024, NULL)) {
-		return errbuf;
-	} else {
-		wcscpy(errbuf, L"Unknown error");
-		return errbuf;
-	}
+    LPVOID lpMsgBuf;
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+    auto wpath = convert.from_bytes(path);
+    DWORD lastError = GetLastError();
+    if (FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        lastError,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR) &lpMsgBuf,
+        0, NULL)) {
+        return convert.to_bytes((const wchar_t*)lpMsgBuf);
+    } else {
+		  return "Unknown error";
+    }
 #else
-
-const char* drive_strerror(int code) {
 	return strerror(code);
 #endif
 }
@@ -67,12 +71,10 @@ class GetFreeSpaceWorker: public AsyncWorker {
       auto wpath = convert.from_bytes(path);
       if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
         this->rcode = 0;
-        this->total = (unsigned int) (total.QuadPart / 1024 / 1024);
-        this->free  = (unsigned int) (free.QuadPart / 1024 / 1024);
+        this->total = total.QuadPart / 1024 / 1024;
+        this->free  = free.QuadPart / 1024 / 1024;
       } else {
         this->rcode = GetLastError();
-        std::wstring err = drive_strerror(this->rcode);
-        this->SetErrorMessage(convert.to_bytes(err).c_str());
       }
 #else
       struct statfs buf;
@@ -82,9 +84,27 @@ class GetFreeSpaceWorker: public AsyncWorker {
         this->free  = (buf.f_bsize * buf.f_bfree) / 1024 / 1024;
       } else {
         this->rcode = errno;
-        this->SetErrorMessage(drive_strerror(rcode));
       }
 #endif /* _WIN32 */
+  }
+
+  virtual void WorkComplete() {
+    Nan::HandleScope scope;
+    if (rcode == 0) {
+      HandleOKCallback();
+    } else {
+      std::string errmsg = os_strerror(rcode);
+      v8::Local<v8::Value> argv[] = {
+#ifdef _WIN32
+        Nan::ErrnoException(rcode, "GetDiskFreeSpaceEx", errmsg.c_str(), this->path.c_str())
+#else
+        Nan::ErrnoException(rcode, "statfs", errmsg.c_str(), this->path.c_str())
+#endif
+      };
+      callback->Call(1, argv, async_resource);
+    }
+    delete callback;
+    callback = NULL;
   }
 
   // Executed when the async work is complete
@@ -98,8 +118,8 @@ class GetFreeSpaceWorker: public AsyncWorker {
 
     Local<Object> return_info = Nan::New<Object>();
 
-    return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<Uint32>(total));
-    return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<Uint32>(free));
+    return_info->Set(Nan::New<String>("totalMegaBytes").ToLocalChecked(), Nan::New<v8::Number>(total));
+    return_info->Set(Nan::New<String>("freeMegaBytes").ToLocalChecked(), Nan::New<v8::Number>(free));
     argv[1] = return_info;
 
     callback->Call(2, argv, async_resource);
@@ -111,14 +131,14 @@ class GetFreeSpaceWorker: public AsyncWorker {
 #else /* _WIN32 */
 	int rcode;
 #endif /* _WIN32 */
-	unsigned int total;
-	unsigned int free;
+  uint64_t total;
+	uint64_t free;
 	std::string path;
 };
 
 NAN_MODULE_INIT(InitAll) {
   Nan::Set(target, Nan::New<String>("getPartitionSpace").ToLocalChecked(),
-    Nan::GetFunction(Nan::New<FunctionTemplate>(getPartitionSpace)).ToLocalChecked());
+           Nan::GetFunction(Nan::New<FunctionTemplate>(getPartitionSpace)).ToLocalChecked());
 }
 
 NODE_MODULE(storage, InitAll)
