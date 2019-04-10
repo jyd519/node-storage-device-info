@@ -30,14 +30,13 @@
 
 #include "storage.h"
 
-using Nan::AsyncWorker;
 using namespace v8;
 
 #ifdef _WIN32
 std::string os_strerror(DWORD code) {
-    LPWSTR lpMsgBuf;
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
-    if (FormatMessageW(
+  LPWSTR lpMsgBuf;
+  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+  if (FormatMessageW(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
         FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -46,46 +45,46 @@ std::string os_strerror(DWORD code) {
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPWSTR)&lpMsgBuf,
         0, NULL)) {
-          std::string msg = convert.to_bytes(lpMsgBuf);
-          LocalFree(lpMsgBuf);
-          return msg;
-    } else {
-		  return "Unknown error";
-    }
+    std::string msg = convert.to_bytes(lpMsgBuf);
+    LocalFree(lpMsgBuf);
+    return msg;
+  } else {
+    return "Unknown error";
+  }
 #else
 std::string os_strerror(int code) {
-	return strerror(code);
+  return strerror(code);
 #endif
 }
 
-class GetFreeSpaceWorker: public AsyncWorker {
- public:
+class GetFreeSpaceWorker: public Nan::AsyncWorker {
+public:
   GetFreeSpaceWorker(Nan::Callback *callback, std::string path)
-    : AsyncWorker(callback), path(path) {}
+    : Nan::AsyncWorker(callback), path(path) {}
   ~GetFreeSpaceWorker() {}
 
   void Execute () {
 #ifdef _WIN32
-      ULARGE_INTEGER total;
-      ULARGE_INTEGER free;
-      std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
-      auto wpath = convert.from_bytes(path);
-      if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
-        this->rcode = 0;
-        this->total = total.QuadPart / 1024 / 1024;
-        this->free  = free.QuadPart / 1024 / 1024;
-      } else {
-        this->rcode = GetLastError();
-      }
+    ULARGE_INTEGER total;
+    ULARGE_INTEGER free;
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
+    auto wpath = convert.from_bytes(path);
+    if (GetDiskFreeSpaceExW(wpath.c_str(), NULL, &total, &free)) {
+      this->rcode = 0;
+      this->total = total.QuadPart / 1024 / 1024;
+      this->free  = free.QuadPart / 1024 / 1024;
+    } else {
+      this->rcode = GetLastError();
+    }
 #else
-      struct statfs buf;
-      if (statfs(path.c_str(), &buf) == 0) {
-        this->rcode = 0;
-        this->total = (buf.f_bsize * buf.f_blocks) / 1024 / 1024;
-        this->free  = (buf.f_bsize * buf.f_bfree) / 1024 / 1024;
-      } else {
-        this->rcode = errno;
-      }
+    struct statfs buf;
+    if (statfs(path.c_str(), &buf) == 0) {
+      this->rcode = 0;
+      this->total = (buf.f_bsize * buf.f_blocks) / 1024 / 1024;
+      this->free  = (buf.f_bsize * buf.f_bfree) / 1024 / 1024;
+    } else {
+      this->rcode = errno;
+    }
 #endif /* _WIN32 */
   }
 
@@ -100,7 +99,7 @@ class GetFreeSpaceWorker: public AsyncWorker {
       Nan::Set(errObj, Nan::New("code").ToLocalChecked(), Nan::New((uint32_t)rcode));
       Nan::Set(errObj, Nan::New("syscall").ToLocalChecked(), Nan::New("GetDiskFreeSpaceEx").ToLocalChecked());
       Nan::Set(errObj, Nan::New("path").ToLocalChecked(), Nan::New(path.c_str()).ToLocalChecked());
-#endif        
+#endif
       v8::Local<v8::Value> argv[] = {
 #ifdef _WIN32
         errObj
@@ -131,15 +130,15 @@ class GetFreeSpaceWorker: public AsyncWorker {
     callback->Call(2, argv, async_resource);
   }
 
- private:
+private:
 #ifdef _WIN32
-	DWORD rcode;
+  DWORD rcode;
 #else /* _WIN32 */
-	int rcode;
+  int rcode;
 #endif /* _WIN32 */
   uint64_t total;
-	uint64_t free;
-	std::string path;
+  uint64_t free;
+  std::string path;
 };
 
 NAN_MODULE_INIT(InitAll) {
@@ -150,20 +149,20 @@ NAN_MODULE_INIT(InitAll) {
 NODE_MODULE(storage, InitAll)
 
 NAN_METHOD(getPartitionSpace) {
-	if (info.Length() < 2) {
-		Nan::ThrowError("Two arguments are required");
-		return;
-	}
+  if (info.Length() < 2) {
+    Nan::ThrowError("Two arguments are required");
+    return;
+  }
 
-	if (! info[0]->IsString()) {
-		Nan::ThrowError("Path argument must be a string");
-		return;
-	}
+  if (! info[0]->IsString()) {
+    Nan::ThrowError("Path argument must be a string");
+    return;
+  }
 
-	if (! info[1]->IsFunction()) {
-		Nan::ThrowError("Callback argument must be a function");
-		return;
-	}
+  if (! info[1]->IsFunction()) {
+    Nan::ThrowError("Callback argument must be a function");
+    return;
+  }
 
   std::string path = *Nan::Utf8String(info[0]);
   Nan::Callback *callback = new Nan::Callback(Nan::To<Function>(info[1]).ToLocalChecked());
